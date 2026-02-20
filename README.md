@@ -1,71 +1,17 @@
 # Bad Deed Validator
 
-A "paranoid" pipeline for parsing and validating OCR-scanned real estate deeds before they touch a blockchain.
+Parses and validates OCR-scanned real estate deeds using an LLM for extraction and deterministic Python for all business logic.
 
-## The Core Design Principle
+**Core principle:** The LLM is a parser, not a judge. It extracts structured data from messy text. All validation (dates, amounts, county matching) is pure code — reproducible, auditable, and hallucination-proof.
 
-> **The LLM is a parser, not a judge.**
+## How It Works
 
-The LLM does one thing: convert messy OCR text into a clean JSON object. Every piece of business logic — date ordering, amount consistency, county resolution — is implemented in deterministic Python code. This means failures are reproducible, auditable, and not subject to hallucination.
-
-## Architecture
-
-```
-Raw OCR Text
-     │
-     ▼
-┌─────────────────────────────┐
-│  Step 1: LLM Extraction     │  Claude parses text → structured dict
-│  (anthropic SDK)            │  Prompt: "extract only, do not validate"
-└────────────┬────────────────┘
-             │
-             ▼
-┌─────────────────────────────┐
-│  Step 2: County Enrichment  │  "S. Clara" → "Santa Clara" → tax_rate 0.012
-│  (pure Python, difflib)     │  Abbreviation expansion + fuzzy match
-└────────────┬────────────────┘
-             │
-             ▼
-┌─────────────────────────────┐
-│  Step 3: Validation         │  All checks are code, not AI
-│  ├─ Date order check        │  recorded >= signed? (datetime comparison)
-│  └─ Amount consistency      │  digits vs. words (word2number library)
-└────────────┬────────────────┘
-             │
-             ▼
-┌─────────────────────────────┐
-│  Step 4: Closing Costs      │  amount × tax_rate
-└─────────────────────────────┘
-```
-
-## How Each Problem Is Solved
-
-### Date Error (`recorded < signed`)
-
-**Code, not AI.** `validate_dates()` parses both ISO strings with `datetime.strptime` and does a direct comparison. If `date_recorded < date_signed`, it raises `TemporalOrderError` with the exact delta in days. This cannot be fooled by a confident-sounding hallucination.
-
-```
-[FAIL] Date order: Temporal impossibility: deed recorded on 2024-01-10
-       but not signed until 2024-01-15 (5 day(s) after recording).
-```
-
-### Amount Discrepancy (`$1,250,000` vs. `"One Million Two Hundred Thousand"`)
-
-**Code, not AI.** `validate_amounts()` uses the `word2number` library to parse the written-word amount into a float independently, then subtracts. Any gap > $0.01 raises `AmountDiscrepancyError`. The system does not silently pick one version — it halts and demands human review.
-
-```
-[FAIL] Amount: $1,250,000.00 (numeric digits) ≠ $1,200,000.00 (written words).
-       Discrepancy: $50,000.00. Manual review required before recording.
-```
-
-### County Matching (`"S. Clara"` → `"Santa Clara"`)
-
-**Deterministic fuzzy matching, not AI.** `match_county()` runs a two-stage lookup:
-
-1. **Abbreviation expansion**: a small lookup table maps `"s."` → `"santa"`, `"st."` → `"saint"`, etc. Both the raw input and the reference names are normalized before comparison.
-2. **Fuzzy match fallback**: `difflib.get_close_matches` handles anything the abbreviation table misses (typos, OCR artifacts), with a 0.6 similarity cutoff.
-
-This approach is transparent, tweakable, and produces the same result every run.
+1. **LLM Extraction** — Claude parses raw OCR text into clean JSON (extraction only, no validation)
+2. **County Enrichment** — Abbreviation expansion (`"S. Clara"` -> `"Santa Clara"`) + `difflib` fuzzy matching to look up the tax rate
+3. **Validation** — Code-only checks that reject the deed on failure:
+   - **Date order**: `datetime` comparison catches recording before signing
+   - **Amount consistency**: Custom word-to-number parser cross-checks digits vs. written words, flags the $50k discrepancy
+4. **Closing Costs** — `amount * tax_rate` (only reached if validation passes)
 
 ## Running It
 
@@ -75,35 +21,18 @@ export ANTHROPIC_API_KEY=sk-...
 python validator.py
 ```
 
-Expected output (this deed has two validation failures):
+Use `python validator.py --mock` to test without an API key.
+
+## Expected Output
+
+The sample deed has two intentional errors, both caught:
 
 ```
-Step 1: Extracting deed data via LLM...
 Step 2: Enriching county data...
-  [County] Exact match (normalized): 'S. Clara' → 'Santa Clara'
+  [County] Exact match (normalized): 'S. Clara' -> 'Santa Clara'
 Step 3: Running validation checks...
-  [FAIL] Date order: Temporal impossibility: deed recorded on 2024-01-10
-         but not signed until 2024-01-15 (5 day(s) after recording).
-  [FAIL] Amount: $1,250,000.00 (numeric digits) ≠ $1,200,000.00 (written words).
-         Discrepancy: $50,000.00. Manual review required before recording.
+  [FAIL] Date order: deed recorded on 2024-01-10 but not signed until 2024-01-15
+  [FAIL] Amount: $1,250,000.00 (numeric) != $1,200,000.00 (written). Discrepancy: $50,000.00
 
 [REJECTED] Temporal Order Error
 ```
-
-## Error Taxonomy
-
-| Exception | Trigger |
-|---|---|
-| `TemporalOrderError` | `date_recorded < date_signed` |
-| `AmountDiscrepancyError` | numeric ≠ written-word amount |
-| `CountyMatchError` | county string can't be resolved to reference data |
-
-All three are subclasses of `DeedValidationError`, so callers can catch them individually or with a single broad handler.
-
-## Files
-
-| File | Purpose |
-|---|---|
-| `validator.py` | Main script — all logic lives here |
-| `counties.json` | Reference data: county names and tax rates |
-| `requirements.txt` | `anthropic` |
