@@ -106,4 +106,4 @@ All three are subclasses of `DeedValidationError`, so callers can catch them ind
 |---|---|
 | `validator.py` | Main script — all logic lives here |
 | `counties.json` | Reference data: county names and tax rates |
-| `requirements.txt` | `anthropic`, `word2number` |
+| `requirements.txt` | `anthropic` |
